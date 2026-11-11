@@ -115,8 +115,9 @@ def main():
                 )
                 subject = rv.get("subject") or subject
                 body = rv.get("body") or body
-                issues = [str(i) for i in rv.get("issues", []) if i]
-                review_score = rv.get("score", "")
+                issues = [str(i) for i in rv.get("issues", []) if i][:6]
+                review_score = next((rv[k] for k in ("score", "review_score", "rating", "readiness")
+                                     if rv.get(k) not in (None, "")), "")
         except RuntimeError as e:
             print(f"FAILED: {r['company']} ({e})")
             continue

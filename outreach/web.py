@@ -9,7 +9,10 @@ from bs4 import BeautifulSoup
 UA = "Mozilla/5.0 (compatible; StudentSocietyOutreachBot/1.0)"
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 SKIP_EMAIL = ("example.", "sentry", "wixpress", ".png", ".jpg", ".webp", "@2x", "noreply", "no-reply",
-              "donotreply", "privacy", "abuse", "legal", "gdpr", "security@", "dpo@")
+              "donotreply", "privacy", "abuse", "legal", "gdpr", "security@", "dpo@",
+              # wrong inboxes for sponsorship asks
+              "press@", "pr@", "media@", "newsroom", "investor", "ir@", "billing", "accounts@", "jobs-noreply")
+SECOND_LEVEL = ("co", "com", "org", "net", "ac", "edu", "gov")  # e.g. example.co.in
 # Link text / URL words that point at pages worth reading, best first.
 PAGE_HINTS = ("sponsor", "partner", "campus", "student", "university", "community", "developer",
               "program", "contact", "about", "career")
@@ -49,6 +52,14 @@ def domain(url):
     return host.removeprefix("www.")
 
 
+def base_domain(url):
+    """aws.amazon.com -> amazon.com, docs.m5stack.com -> m5stack.com, shop.example.co.in -> example.co.in"""
+    parts = domain(url).split(".")
+    if len(parts) >= 3 and parts[-2] in SECOND_LEVEL and len(parts[-1]) == 2:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
 def is_company_site(url):
     d = domain(url)
     return bool(d) and "." in d and not any(s in d for s in SKIP_DOMAINS)
@@ -74,7 +85,10 @@ def public_emails(text, soup=None):
     if soup:
         for a in soup.select('a[href^="mailto:"]'):
             found.add(a["href"][7:].split("?")[0].strip())
-    return {e.strip(".").lower() for e in found if not any(s in e.lower() for s in SKIP_EMAIL)}
+    def bad(e):
+        local = e.split("@")[0] + "@"
+        return any(local == s if s.endswith("@") else s in e for s in SKIP_EMAIL)
+    return {e.strip(".").lower() for e in found if not bad(e.strip(".").lower())}
 
 
 def rank_emails(emails, company_domain=""):

@@ -18,7 +18,9 @@ Check each point and fix the draft if anything fails:
 10. Reads like a polite human wrote it.
 
 Return only JSON:
-{"issues": ["short description of each problem you found"], "subject": "...", "body": "...",
- "score": 1-10}
+{"issues": ["..."], "subject": "...", "body": "...", "score": 1-10}
+"issues" = ONLY the problems you actually found and fixed, each under 15 words
+(e.g. "removed invented audience number", "opening line was generic"). Do not list checks that passed.
+Empty list if nothing was wrong.
 "subject"/"body" = the corrected email (unchanged if nothing was wrong).
 "score" = how ready this email is to send after your fixes (10 = send as-is).

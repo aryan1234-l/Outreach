@@ -75,13 +75,13 @@ def main():
     past = read_csv(resolve(args.past))
     col = company_col(past)
     known = {norm(r[col]) for r in past if r.get(col)}
-    known_domains = {web.domain(r["website"]) for r in past if r.get("website")}
+    known_domains = {web.base_domain(r["website"]) for r in past if r.get("website")}
 
     OUT.parent.mkdir(exist_ok=True)
     if OUT.exists():
         existing = read_csv(OUT)
         known |= {norm(r["company"]) for r in existing}
-        known_domains |= {web.domain(r["website"]) for r in existing if r.get("website")}
+        known_domains |= {web.base_domain(r["website"]) for r in existing if r.get("website")}
         with open(OUT, encoding="utf-8-sig") as fh:
             if fh.readline().strip().split(",") != FIELDS:
                 write_csv(OUT, existing)  # upgrade old file to the current columns
@@ -144,10 +144,11 @@ def main():
         if not dom:
             print(f"[{i}] {cand['name']}: no website found, skipped")
             continue
-        if dom in known_domains:
-            print(f"[{i}] {cand['name']}: already known ({dom}), skipped")
+        base = web.base_domain(site)
+        if base in known_domains:
+            print(f"[{i}] {cand['name']}: already known ({base}), skipped")
             continue
-        known_domains.add(dom)
+        known_domains.add(base)
 
         pages, emails = web.company_pages(site)
         page_text = "\n\n".join(f"[{u}]\n{t}" for u, t in pages if t)

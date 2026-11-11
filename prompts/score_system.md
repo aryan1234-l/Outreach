@@ -12,6 +12,13 @@ Score fit 1-10:
 - 5-6: relevant tech company or sector, but no direct signal.
 - 1-4: unrelated sector, defunct, a one-person site, a directory/listing site, or not a company.
 
+Reachability matters: a student society's cold email gets answered by startups and mid-size companies,
+Indian companies, and companies with a named student/campus/community program. Giant multinationals
+(Google, Amazon, Microsoft, Meta, Apple, etc.) almost never answer a generic inbox: cap them at 6 unless
+the inputs show a specific student sponsorship / community program we can apply to, and then name that
+program in "suggested_ask" and "contact_role". (Google support for a GDG chapter goes through the GDG
+program, not cold email: cap Google at 5.)
+
 Rules:
 - Base everything on the website text and snippets. Do not invent facts. If unsure, score lower.
 - "what_they_do": one plain sentence.
