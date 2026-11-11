@@ -31,6 +31,16 @@ def load_prompt(name):
     return (ROOT / "prompts" / f"{name}.md").read_text(encoding="utf-8")
 
 
+def resolve(path):
+    """Accept paths relative to the current folder or to the repo root."""
+    p = pathlib.Path(path)
+    if p.exists() or p.is_absolute():
+        return p
+    if (ROOT / p).exists():
+        return ROOT / p
+    sys.exit(f"File not found: {path} (also looked in {ROOT / p})")
+
+
 def load_config():
     return json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 

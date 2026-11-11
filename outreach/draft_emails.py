@@ -9,9 +9,12 @@ and output/drafts/<company>.txt for easy reading.
 import argparse
 import csv
 import json
+import pathlib
 import re
+import sys
 
-from .llm import ROOT, chat_json, load_config, load_prompt, start_server
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))  # works as script or module
+from outreach.llm import ROOT, chat_json, load_config, load_prompt, resolve, start_server
 
 OUT_DIR = ROOT / "output"
 
@@ -30,7 +33,7 @@ def main():
         if isinstance(value, str):
             system = system.replace("{" + key + "}", value)
 
-    with open(args.input, newline="", encoding="utf-8-sig") as fh:
+    with open(resolve(args.input), newline="", encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
     todo = [
         r for r in rows

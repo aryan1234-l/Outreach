@@ -9,11 +9,14 @@ import argparse
 import csv
 import json
 import re
+import pathlib
+import sys
 import time
 from urllib.parse import urlparse
 
-from . import web
-from .llm import ROOT, chat_json, load_config, load_prompt, start_server
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))  # works as script or module
+from outreach import web
+from outreach.llm import ROOT, chat_json, load_config, load_prompt, resolve, start_server
 
 OUT = ROOT / "output" / "prospects.csv"
 FIELDS = [
@@ -53,7 +56,7 @@ def main():
     args, _ = ap.parse_known_args()
 
     cfg = load_config()
-    past = read_csv(args.past)
+    past = read_csv(resolve(args.past))
     col = company_col(past)
     known = {norm(r[col]) for r in past if r.get(col)}
 
