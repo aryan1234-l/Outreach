@@ -32,8 +32,24 @@ from outreach.llm import ROOT, load_config, resolve
 OUT_DIR = ROOT / "output"
 LOG = OUT_DIR / "sent_log.csv"
 LOG_FIELDS = ["sent_at", "company", "to", "subject", "message_id", "mode"]
-EMAIL_OK = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+EMAIL_OK = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 OPT_OUT = "If this isn't relevant for you, just reply 'no' and we won't follow up."
+
+
+def clean_address(raw):
+    """Return a plain ASCII address, or "" if there isn't exactly one valid one.
+
+    Handles 'Name <a@b.com>', mailto:, stray spaces, zero-width / non-breaking spaces
+    pasted from Sheets or WhatsApp, and 'a@b.com; c@d.com' (takes the first).
+    """
+    text = (raw or "").replace("mailto:", "")
+    text = re.sub(r"[​-‏⁠﻿ ]", "", text)
+    first = re.split(r"[;,\s]+", text.strip().strip("<>").strip())[0] if text.strip() else ""
+    first = first.strip("<>\"'")
+    m = EMAIL_OK.fullmatch(first)
+    if not m:
+        m = EMAIL_OK.search(text)  # e.g. 'Name <a@b.com>'
+    return m.group(0) if m else ""
 
 
 def secret(name):
@@ -99,16 +115,22 @@ def main():
     sent_24h = sum(1 for r in real_log if now - dt.datetime.fromisoformat(r["sent_at"]) < dt.timedelta(hours=24))
     room = args.limit if args.test_to else min(args.limit, args.daily_cap - sent_24h)
 
+    if args.test_to is not None:
+        args.test_to = clean_address(args.test_to)
+        if not args.test_to:
+            sys.exit("--test-to must be one plain email address, e.g. --test-to yourname@gmail.com")
+
     queue, skipped = [], []
     for d in drafts:
-        to = (d.get("to") or "").strip()
+        to = clean_address(d.get("to"))
+        d["to"] = to
         why = None
         if (d.get("approved") or "").strip().lower() not in ("yes", "y", "true", "1"):
             why = "not approved"
         elif not d.get("subject") or not d.get("body"):
             why = "empty subject/body"
-        elif not args.test_to and not EMAIL_OK.match(to):
-            why = f"bad/missing address '{to}'"
+        elif not args.test_to and not to:
+            why = f"bad/missing address {d.get('to')!r}"
         elif not args.test_to and (to.lower() in done or d["company"].lower() in done):
             why = "already contacted"
         if why:
@@ -144,7 +166,11 @@ def main():
             to = args.test_to or d["to"].strip()
             subject = ("[TEST] " if args.test_to else "") + d["subject"]
             msg = build_message(sender, sender_name, to, subject, d["body"])
-            smtp.send_message(msg)
+            try:
+                smtp.send_message(msg, from_addr=sender, to_addrs=[to])
+            except smtplib.SMTPRecipientsRefused as e:
+                print(f"FAIL  {d['company']} -> {to!r}: Gmail refused the address {e.recipients}")
+                continue
             append_log({
                 "sent_at": dt.datetime.now().isoformat(timespec="seconds"),
                 "company": d["company"], "to": to, "subject": subject,
