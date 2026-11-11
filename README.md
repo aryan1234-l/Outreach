@@ -4,7 +4,9 @@ Finds companies likely to sponsor our events, starting from our past sponsors, a
 personalized email for each one. Everything is free: Qwen 35B runs on Kaggle's free 2x T4 GPUs and
 search goes through DuckDuckGo (`ddgs`).
 
-**It never sends anything.** A person reviews every prospect and every email before it goes out.
+**Nothing goes out without a person approving it.** Someone approves each prospect, then reads and
+approves each email, and only then does `send_emails` send it through the society's Gmail, slowly and once
+per company.
 
 ```
 past_sponsors.csv ──► find_sponsors ──► output/prospects.csv ──► (human sets status=approved)
@@ -14,7 +16,8 @@ past_sponsors.csv ──► find_sponsors ──► output/prospects.csv ──�
                          │  reads each company's own site                    (+ brochure)    output/drafts/*.txt
                          └  LLM scores fit 1-10, picks public contact email                       │
                                                                                                     ▼
-                                                                                   human reviews + sends
+                                                         human sets approved=yes ─► send_emails ─► Gmail
+                                                                                    (max 30/day, once per company)
 ```
 
 ## Repo layout
@@ -30,6 +33,7 @@ past_sponsors.csv ──► find_sponsors ──► output/prospects.csv ──�
 | `outreach/web.py` | Search, page fetch, public email extraction |
 | `outreach/find_sponsors.py` | Step 1: past sponsors → new prospects |
 | `outreach/draft_emails.py` | Step 2: approved prospects → email drafts |
+| `outreach/send_emails.py` | Step 3: approved drafts → Gmail (rate-limited, logged, once per company) |
 
 ## Setup (Kaggle, free)
 
@@ -83,15 +87,40 @@ rerun. Download the CSV, open it in Google Sheets, and set `status` to `approved
 !python -m outreach.draft_emails --min-score 6
 ```
 
-`output/drafts.csv` has `to, subject, body` columns, ready for a Google Sheets mail merge, or copy each
-draft into Gmail.
+Rerunning only drafts new companies; existing drafts (and your edits) are kept. `--redo` rewrites all.
+
+**Send through Gmail:**
+
+One-time setup on the society Gmail account: Google Account → Security → turn on 2-Step Verification →
+search "App passwords" → create one. In Kaggle: Add-ons → Secrets → add `GMAIL_ADDRESS` and
+`GMAIL_APP_PASSWORD`, and switch both on for the notebook. **Never put the password in the repo.**
+
+Open `output/drafts.csv`, read every draft, fix anything wrong, and set `approved` to `yes` for the
+ones to send. Then:
+
+```python
+!python -m outreach.send_emails                                   # preview: shows what would go out
+!python -m outreach.send_emails --test-to yourname@gmail.com --send   # send all to yourself first
+!python -m outreach.send_emails --send                            # real send
+```
+
+The sender:
+- only sends rows with `approved=yes` and a valid address
+- never emails the same company or address twice (tracked in `output/sent_log.csv`; keep this file
+  between sessions: download it, or save it to a Kaggle dataset)
+- sends at most 20 per run and 30 per 24 hours (`--limit`, `--daily-cap`), with a random 30-90 s gap
+- adds the opt-out line if a draft is missing it
+- sends plain-text emails with no attachments (brochure is a link)
+
+Replies come to the society inbox. Mark them in the prospects sheet (`replied` / `declined`).
 
 ## How we deal with spam
 
 The goal is that no one we email could reasonably call it spam, and our society account never gets
 flagged.
 
-- **A human reads and sends every email.** The tool only drafts. No auto-sending, no bulk BCC.
+- **A human approves every email.** Nothing is sent unless someone read the draft and set
+  `approved=yes`. One recipient per email, no bulk BCC.
 - **Only public business contacts.** Emails come from the company's own website (partnerships@,
   campus@, careers@...). The scorer can only pick emails that actually appear on the site, never guessed
   ones. No scraped personal emails, no LinkedIn scraping or LinkedIn bots.

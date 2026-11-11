@@ -24,6 +24,7 @@ def main():
     ap.add_argument("--input", default=str(OUT_DIR / "prospects.csv"))
     ap.add_argument("--all", action="store_true", help="draft every row, not just status=approved")
     ap.add_argument("--min-score", type=int, default=0)
+    ap.add_argument("--redo", action="store_true", help="discard drafts.csv and redraft everything")
     args, _ = ap.parse_known_args()
 
     cfg = load_config()
@@ -35,13 +36,23 @@ def main():
 
     with open(resolve(args.input), newline="", encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
+    # Keep existing drafts (and their approved=yes edits); only draft companies not done yet.
+    drafts_csv = OUT_DIR / "drafts.csv"
+    existing = []
+    if drafts_csv.exists() and not args.redo:
+        with open(drafts_csv, newline="", encoding="utf-8-sig") as fh:
+            existing = list(csv.DictReader(fh))
+    have = {r["company"].strip().lower() for r in existing}
+
     todo = [
         r for r in rows
         if (args.all or r.get("status", "").strip().lower() == "approved")
         and int(float(r.get("fit_score") or 0)) >= args.min_score
+        and r["company"].strip().lower() not in have
     ]
     if not todo:
-        raise SystemExit("Nothing to draft. Set status=approved on some rows (or use --all for a test).")
+        raise SystemExit("Nothing new to draft. Set status=approved on some rows (or use --all for a test). "
+                         "Already-drafted companies are skipped; use --redo to rewrite all.")
 
     start_server()
     (OUT_DIR / "drafts").mkdir(parents=True, exist_ok=True)
@@ -61,6 +72,7 @@ def main():
             "body": d.get("body", ""),
             "confidence": d.get("confidence", ""),
             "missing_info": "; ".join(d.get("missing_info", []) or []),
+            "approved": "no",  # a human reads the draft and changes this to "yes"
         })
         fname = re.sub(r"[^A-Za-z0-9]+", "_", r["company"]).strip("_") or "company"
         (OUT_DIR / "drafts" / f"{fname}.txt").write_text(
@@ -69,11 +81,12 @@ def main():
         )
         print(f"Drafted: {r['company']} (confidence {d.get('confidence', '?')})")
 
-    with open(OUT_DIR / "drafts.csv", "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, list(out_rows[0].keys()))
+    with open(drafts_csv, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, list(out_rows[0].keys()), extrasaction="ignore", restval="")
         w.writeheader()
-        w.writerows(out_rows)
-    print(f"\n{len(out_rows)} drafts in {OUT_DIR / 'drafts.csv'}. A human reads and sends each one.")
+        w.writerows(existing + out_rows)
+    print(f"\n{len(out_rows)} new drafts added to {drafts_csv}. Read each one, edit if needed, "
+          "set approved=yes, then run outreach.send_emails.")
 
 
 if __name__ == "__main__":
