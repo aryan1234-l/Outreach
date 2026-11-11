@@ -1,151 +1,427 @@
-# Outreach: sponsor finder + email drafter
+# Outreach: sponsor finder, email drafter and Gmail sender
 
-Finds companies likely to sponsor our events, starting from our past sponsors, and drafts a
-personalized email for each one. Everything is free: Qwen 35B runs on Kaggle's free 2x T4 GPUs and
-search goes through DuckDuckGo (`ddgs`).
+Built for GDG On Campus NIT Hamirpur. It starts from the sheet of past sponsors, finds **new** companies
+likely to sponsor us, writes a personalized email for each one, and sends the approved ones through the
+society's Gmail, slowly and only once per company.
+
+Everything is free:
+- **LLM:** Qwen3.6-35B-A3B running on Kaggle's free GPUs (2x T4) through llama.cpp
+- **Search:** DuckDuckGo and other engines through the `ddgs` Python library (no API key)
+- **Sending:** the society's Gmail account over SMTP with an app password
 
 **Nothing goes out without a person approving it.** Someone approves each prospect, then reads and
-approves each email, and only then does `send_emails` send it through the society's Gmail, slowly and once
-per company.
+approves each email. Only then can `send_emails` send it.
+
+---
+
+## Contents
+
+1. [How it works](#how-it-works)
+2. [Repo layout](#repo-layout)
+3. [One-time setup](#one-time-setup)
+4. [Fill in the inputs](#fill-in-the-inputs)
+5. [Run it on Kaggle](#run-it-on-kaggle)
+6. [Step-by-step usage](#step-by-step-usage)
+7. [Output files explained](#output-files-explained)
+8. [How we deal with spam](#how-we-deal-with-spam)
+9. [Tuning the prompts](#tuning-the-prompts)
+10. [Troubleshooting](#troubleshooting)
+11. [Limitations](#limitations)
+12. [Who does what](#who-does-what)
+
+---
+
+## How it works
 
 ```
-past_sponsors.csv ──► find_sponsors ──► output/prospects.csv ──► (human sets status=approved)
-                         │  LLM writes search queries                       │
-                         │  web search + read result pages                  ▼
-                         │  LLM extracts companies, skips ones we know   draft_emails ──► output/drafts.csv
-                         │  reads each company's own site                    (+ brochure)    output/drafts/*.txt
-                         └  LLM scores fit 1-10, picks public contact email                       │
-                                                                                                    ▼
-                                                         human sets approved=yes ─► send_emails ─► Gmail
-                                                                                    (max 30/day, once per company)
+ data/past_sponsors.csv
+          │
+          ▼
+ ┌──────────────────────────── find_sponsors ────────────────────────────┐
+ │ 1. LLM reads past sponsors + config.json, writes search queries        │
+ │ 2. Each query is searched on the web (ddgs)                            │
+ │ 3. Each result page is fetched; LLM lists companies on it              │
+ │ 4. Companies already in past sponsors / earlier runs are dropped       │
+ │ 5. Each new company's own website is read (home + contact/about pages) │
+ │ 6. LLM scores fit 1-10, writes a reason, picks a public contact email  │
+ └─────────────────────────────────────────────────────────────────────────┘
+          │
+          ▼
+ output/prospects.csv  ──►  HUMAN sets status = approved on good rows
+          │
+          ▼
+ ┌──────── draft_emails ────────┐
+ │ prospect + brochure + prompt │──►  output/drafts.csv, output/drafts/*.txt
+ └──────────────────────────────┘
+          │
+          ▼
+ HUMAN reads every draft, edits it, sets approved = yes
+          │
+          ▼
+ ┌──────── send_emails ─────────┐
+ │ preview by default            │──►  Gmail (max 30 per 24h, 30-90 s gaps)
+ │ --send to actually send       │──►  output/sent_log.csv (never email twice)
+ └──────────────────────────────┘
 ```
+
+Every LLM step has its own system prompt in `prompts/`, so the team can tune behaviour without touching
+code.
+
+---
 
 ## Repo layout
 
-| Path | What |
+| Path | What it is |
 |---|---|
-| `config.json` | Society details used in every prompt. **Fill this in first.** |
-| `data/brochure.md` | Summary of the Design Team's brochure (tiers, reach, link) |
-| `data/past_sponsors.csv` | Previous sponsors sheet (not committed, copy from `past_sponsors.example.csv`) |
-| `data/society_test.csv` | Fake prospects made from our own members, for the end-to-end test |
-| `prompts/` | All system prompts: `queries`, `extract`, `score`, `outreach` |
-| `outreach/llm.py` | Starts Qwen on Kaggle with llama.cpp, `chat_json()` helper |
-| `outreach/web.py` | Search, page fetch, public email extraction |
-| `outreach/find_sponsors.py` | Step 1: past sponsors → new prospects |
-| `outreach/draft_emails.py` | Step 2: approved prospects → email drafts |
-| `outreach/send_emails.py` | Step 3: approved drafts → Gmail (rate-limited, logged, once per company) |
+| `config.json` | Society details (name, college, audience, sender). Used in every prompt. |
+| `data/brochure.md` | Short summary of the Design Team's brochure: event, reach, tiers, link. |
+| `data/past_sponsors.csv` | Previous sponsors sheet. **Not committed** (has contact details). |
+| `data/past_sponsors.example.csv` | Example of the expected columns. |
+| `data/society_test.csv` | Fake prospects made from our own members, for the end-to-end test. |
+| `prompts/queries_system.md` | Prompt: past sponsors → search queries. |
+| `prompts/extract_system.md` | Prompt: web page → list of companies on it. |
+| `prompts/score_system.md` | Prompt: company website → fit score, reason, contact. |
+| `prompts/outreach_system.md` | Prompt: prospect + brochure → email (the main system prompt). |
+| `outreach/llm.py` | Downloads and starts Qwen on Kaggle; `chat_json()` helper used by all steps. |
+| `outreach/web.py` | Web search, page fetching, public email extraction. |
+| `outreach/find_sponsors.py` | Step 1: find and score new prospects. |
+| `outreach/draft_emails.py` | Step 2: write email drafts for approved prospects. |
+| `outreach/send_emails.py` | Step 3: send approved drafts through Gmail. |
+| `kaggle/run_e2e.py` | One script that runs the whole pipeline on Kaggle (test mode, no sending). |
+| `output/` | Everything the tools produce. **Not committed.** |
 
-## Setup (Kaggle, free)
+---
 
-1. New Kaggle notebook → Settings: **Accelerator: GPU T4 x2**, **Internet: on**.
-   (Internet needs a phone-verified Kaggle account.)
-2. Run these cells:
+## One-time setup
+
+### 1. Kaggle account
+- Sign up at kaggle.com and **verify your phone number** (required for GPU and internet).
+- You get about 30 free GPU hours a week. One full run uses well under an hour.
+
+### 2. Kaggle notebook
+- **Create → New Notebook**.
+- Right panel → **Session options**: Accelerator **GPU T4 x2**, Internet **On**.
+
+### 3. Gmail app password (only needed for real sending)
+Use the **society's** Gmail account, not a personal one.
+1. myaccount.google.com → **Security** → turn on **2-Step Verification**.
+2. Search **"App passwords"** in account settings → create one called "Outreach" → copy the
+   16-character code.
+3. In the Kaggle notebook: **Add-ons → Secrets → Add secret**:
+   - `GMAIL_ADDRESS` = the society Gmail address
+   - `GMAIL_APP_PASSWORD` = the 16-character code
+4. Switch both secrets **on** for this notebook.
+
+**Never put the password in the repo, a notebook cell, or a chat.** If it leaks, delete it in Google
+account settings and create a new one.
+
+---
+
+## Fill in the inputs
+
+### `config.json`
+These go into every prompt and into the email signature, so write them exactly as you want them to
+appear in the emails.
+
+```json
+{
+  "society_name": "GDG On Campus NIT Hamirpur",
+  "college": "National Institute of Technology Hamirpur",
+  "city": "Hamirpur, Himachal Pradesh",
+  "about": "Student developer community running workshops, hackathons and study jams.",
+  "audience": "500+ members, 300+ per event",
+  "tech_areas": "Android, Web, Cloud, AI/ML, Blockchain",
+  "upcoming_event": "Labyrinth 2026, <dates>, ~500 participants",
+  "sender_name": "<Your full name>",
+  "sender_role": "Outreach Team, GDG On Campus NIT Hamirpur"
+}
+```
+
+Use real numbers only. The model copies them straight into the emails.
+
+### `data/brochure.md`
+Summary of the Design Team's brochure. Keep it short; the model reads it for every email.
+
+```markdown
+Brochure link: https://drive.google.com/file/d/<real id>/view
+
+Event: Labyrinth 2026, <dates>, <venue>
+Reach: 500 participants, 1,200+ community members, <followers>
+Sponsorship tiers:
+- Title: ₹<amount> - <benefits>
+- Gold: ₹<amount> - <benefits>
+- Silver / In-kind: <amount or swag/credits> - <benefits>
+What sponsors get: <logo placement, booth, talk slot, resume access, social posts>
+```
+
+Make the Drive link viewable by "Anyone with the link".
+
+### `data/past_sponsors.csv`
+Export the old sponsors sheet as CSV. Only `company` is required; the other columns help the model
+understand what kind of companies to look for.
+
+```csv
+company,industry,what_they_gave,year,notes
+Devfolio,Hackathon platform,Platform + prizes,2025,Hosted our hackathon
+Postman,Developer tools,Swag + API credits,2025,Wanted developer adoption
+```
+
+If the sheet lists people, put the company they work at in `company` and their name/role in `notes`.
+This file is git-ignored. On Kaggle, upload it as a **private dataset** or write it in a cell (see below).
+
+### `data/society_test.csv`
+Pretend some of our own members are companies, with **their own email** as the contact, so the test emails
+go to us. Get their OK first. Keep `fit_score` between 1 and 10, and use `status` = `approved`.
+
+```csv
+company,website,what_they_do,fit_score,reason,suggested_ask,contact_emails,contact_role,status
+Rijul Tech Labs,https://example.com,Android developer tools,8,Hires student Android interns,Gold sponsorship,member1@gmail.com,Founder,approved
+Raman Cloud Co,https://example.com,Cloud hosting,4,Tech company,Swag,member2@gmail.com,,approved
+```
+
+Add one deliberately vague row (like the second one): its draft should come back with **low
+confidence**. That shows the safety check works.
+
+---
+
+## Run it on Kaggle
+
+### Option A: one-click end-to-end test
+Paste into one cell:
 
 ```python
-!git clone https://github.com/aryan1234-l/Outreach.git
-%cd Outreach
+!wget -q https://raw.githubusercontent.com/aryan1234-l/Outreach/main/kaggle/run_e2e.py -O run_e2e.py
+!python run_e2e.py
+```
+
+This clones the repo, starts Qwen, drafts the society test emails, previews sending (nothing is sent),
+and runs a small sponsor search. Results are in `/kaggle/working/Outreach/output/`.
+
+### Option B: step by step (normal use)
+
+```python
+# 1. Get the code (first time) or update it (later)
+!git clone https://github.com/aryan1234-l/Outreach.git || (cd Outreach && git pull)
+%cd /kaggle/working/Outreach
 !pip -q install -r requirements.txt
 ```
 
 ```python
-# Upload the past sponsors sheet as a Kaggle dataset, or write it here.
-# Needs a "company" column; any other columns (industry, what they gave, notes) help the model.
+# 2. Past sponsors: copy from a Kaggle dataset...
 !cp /kaggle/input/<your-dataset>/past_sponsors.csv data/past_sponsors.csv
 ```
-
 ```python
-!python -m outreach.llm          # first run downloads the 17 GB model (~1 min) and starts the server
+# ...or write it here
+%%writefile data/past_sponsors.csv
+company,industry,what_they_gave,year,notes
+Devfolio,Hackathon platform,Platform + prizes,2025,Hosted our hackathon
 ```
 
-3. Edit `config.json` and `data/brochure.md` (in the notebook file browser, or commit them).
-
-## Run
-
-**End-to-end test on our society first.** Put 2-3 of our members (with their OK) into
-`data/society_test.csv` as fake companies, with **their own email** as the contact. Then:
-
 ```python
-!python -m outreach.draft_emails --input data/society_test.csv --all
+# 3. Start the LLM (first run downloads ~17 GB, takes 2-3 minutes)
+!python -m outreach.llm
+```
+
+Then follow [Step-by-step usage](#step-by-step-usage).
+
+The model server keeps running in the background for the rest of the session; every script reuses it.
+When the Kaggle session ends, everything in `/kaggle/working` is deleted. **Download `output/` before
+closing**, especially `sent_log.csv`.
+
+---
+
+## Step-by-step usage
+
+### Step 0: society test (do this first, every time prompts change)
+```python
+!python -m outreach.draft_emails --input data/society_test.csv --all --redo
 !cat output/drafts/*.txt
 ```
+Check: only facts from the inputs, correct greeting, correct signature, real brochure link, vague row
+gets low confidence. Then send the test emails **to yourself**:
+```python
+import pandas as pd
+p = "output/drafts.csv"; df = pd.read_csv(p); df["approved"] = "yes"; df.to_csv(p, index=False)
+!python -m outreach.send_emails --test-to yourname@gmail.com --send
+```
+Check how they look in the inbox (and that they didn't land in spam). Then clear the test drafts:
+`!rm -rf output/drafts output/drafts.csv`
 
-Check that the emails only use facts from the inputs, sound right, and that the low-information row gets
-low confidence. Tweak `prompts/outreach_system.md` until they're good.
-
-**Find real sponsors:**
-
+### Step 1: find sponsors
 ```python
 !python -m outreach.find_sponsors --max-candidates 30
 ```
 
-This takes a while (it reads every page with the LLM). It writes rows to `output/prospects.csv` as it
-goes, and skips companies already in the past sponsors sheet or in earlier runs, so you can stop and
-rerun. Download the CSV, open it in Google Sheets, and set `status` to `approved` for the good ones
-(and fix contacts by hand if needed). Put it back at `output/prospects.csv`, then:
+| Option | Default | Meaning |
+|---|---|---|
+| `--past` | `data/past_sponsors.csv` | Past sponsors sheet |
+| `--queries` | 12 | How many search queries the LLM writes |
+| `--results-per-query` | 5 | Search results read per query |
+| `--max-candidates` | 30 | Max new companies researched this run |
 
+It takes roughly 1-2 minutes per company. Rows are appended to `output/prospects.csv` as it goes, so you
+can stop it any time. Rerunning skips companies already found.
+
+### Step 2: review prospects
+Download `output/prospects.csv`, open it in Google Sheets, and for each row:
+- Read `reason`. Does it make sense? Is the company real and active?
+- Set `status` to `approved` for the good ones (or `rejected`).
+- If `contact_emails` is empty, find a public contact (company site, "Contact us" page) or note the
+  `contact_role` to find on LinkedIn **manually**.
+
+Upload it back to `output/prospects.csv` (Kaggle file browser → upload).
+
+### Step 3: draft emails
 ```python
 !python -m outreach.draft_emails --min-score 6
+!cat output/drafts/*.txt
 ```
 
-Rerunning only drafts new companies; existing drafts (and your edits) are kept. `--redo` rewrites all.
+| Option | Meaning |
+|---|---|
+| `--input` | Prospects file (default `output/prospects.csv`) |
+| `--all` | Draft every row, ignoring `status` (testing only) |
+| `--min-score N` | Only rows with `fit_score >= N` |
+| `--redo` | Throw away `drafts.csv` and redraft everything |
 
-**Send through Gmail:**
+Rerunning only drafts new companies; existing drafts and your edits are kept.
 
-One-time setup on the society Gmail account: Google Account → Security → turn on 2-Step Verification →
-search "App passwords" → create one. In Kaggle: Add-ons → Secrets → add `GMAIL_ADDRESS` and
-`GMAIL_APP_PASSWORD`, and switch both on for the notebook. **Never put the password in the repo.**
+### Step 4: approve drafts
+Open `output/drafts.csv`. For each row: read the body, fix anything wrong, check `missing_info`, and
+set `approved` to `yes`. Rows with low `confidence` usually need a rewrite or should be dropped.
 
-Open `output/drafts.csv`, read every draft, fix anything wrong, and set `approved` to `yes` for the
-ones to send. Then:
-
+### Step 5: send
 ```python
-!python -m outreach.send_emails                                   # preview: shows what would go out
-!python -m outreach.send_emails --test-to yourname@gmail.com --send   # send all to yourself first
-!python -m outreach.send_emails --send                            # real send
+!python -m outreach.send_emails            # preview: prints exactly what would go out
+!python -m outreach.send_emails --send     # real send
 ```
 
-The sender:
-- only sends rows with `approved=yes` and a valid address
-- never emails the same company or address twice (tracked in `output/sent_log.csv`; keep this file
-  between sessions: download it, or save it to a Kaggle dataset)
-- sends at most 20 per run and 30 per 24 hours (`--limit`, `--daily-cap`), with a random 30-90 s gap
-- adds the opt-out line if a draft is missing it
-- sends plain-text emails with no attachments (brochure is a link)
+| Option | Default | Meaning |
+|---|---|---|
+| `--send` | off | Actually send. Without it, nothing is sent. |
+| `--test-to ADDR` | - | Send every email to ADDR instead (subject gets `[TEST]`) |
+| `--limit` | 20 | Max emails this run |
+| `--daily-cap` | 30 | Max real emails in any 24 hours |
+| `--min-gap` / `--max-gap` | 30 / 90 | Random wait between emails, in seconds |
 
-Replies come to the society inbox. Mark them in the prospects sheet (`replied` / `declined`).
+The sender cleans each address (removes invisible characters, `mailto:`, `Name <...>`), skips rows that
+aren't approved, have no valid address, or were already contacted, and logs every send.
+
+### Step 6: follow up
+Replies arrive in the society inbox. Update `status` in your prospects sheet: `replied`, `declined`,
+`meeting`, `sponsored`. One polite follow-up after about 7 days with no reply is fine; after that, stop.
+
+---
+
+## Output files explained
+
+| File | Columns | Notes |
+|---|---|---|
+| `output/prospects.csv` | company, website, what_they_do, fit_score, reason, suggested_ask, contact_emails, contact_role, found_via, status, notes | `found_via` = the page where we found them. `contact_emails` only contains addresses that really appear on their website. |
+| `output/drafts.csv` | company, to, subject, body, confidence, missing_info, approved | Edit `body`/`subject` freely before approving. |
+| `output/drafts/<company>.txt` | - | Same drafts, easy to read. |
+| `output/sent_log.csv` | sent_at, company, to, subject, message_id, mode | `mode` = `real` or `test`. **Keep this file between sessions**: it is what stops double-sending. |
+| `/kaggle/working/server.log` | - | llama.cpp log, for debugging. |
+
+---
 
 ## How we deal with spam
 
-The goal is that no one we email could reasonably call it spam, and our society account never gets
-flagged.
+The goal: nobody we email could reasonably call it spam, and the society's Gmail never gets flagged.
 
-- **A human approves every email.** Nothing is sent unless someone read the draft and set
-  `approved=yes`. One recipient per email, no bulk BCC.
-- **Only public business contacts.** Emails come from the company's own website (partnerships@,
-  campus@, careers@...). The scorer can only pick emails that actually appear on the site, never guessed
-  ones. No scraped personal emails, no LinkedIn scraping or LinkedIn bots.
-- **Every email is personal.** Each one opens with a specific reason this company fits us. Drafts with
-  low `confidence` get rewritten or dropped.
-- **Small batches:** max ~20-30 emails per day per sender account, spread across team members. A burst of
-  near-identical emails is what gets Gmail accounts flagged.
-- **One email, at most one follow-up** after about 7 days. Track it in the `status` column
-  (`new` → `approved` → `sent` → `followed_up` → `replied` / `declined`) so nobody contacts the same
-  company twice.
-- **Easy opt-out.** Every email ends with "reply 'no' and we won't follow up". If they say no, mark them
-  `declined` and never contact them again.
-- **Send from an official society address**, and link the brochure (Drive/PDF link) instead of
-  attaching big files, since attachments from unknown senders trip spam filters.
-- **Fill `config.json` honestly.** The prompts forbid made-up numbers, but they can only be as accurate as
-  what we give them.
+**People in the loop**
+- A person approves each prospect, then reads and approves each email. Nothing is sent unless
+  `approved=yes`.
+- `send_emails` previews by default; sending needs an explicit `--send`.
+
+**Who we contact**
+- Only **public business contacts** found on the company's own website (partnerships@, campus@,
+  careers@, marketing@...). The scorer can only pick addresses that actually appear on the site, so it
+  can't make one up.
+- No scraped personal emails, no LinkedIn scraping, no LinkedIn bots. LinkedIn messages are sent by hand.
+- Never re-contact anyone who said no.
+
+**How much**
+- Max 20 per run and 30 per 24 hours by default, with a random 30-90 s gap. Bursts of similar emails are
+  what get Gmail accounts flagged.
+- One email per company, plus at most one follow-up after about 7 days. `sent_log.csv` blocks
+  re-sending to the same company or address.
+- Spread big campaigns over several days, or several team members' society accounts.
+
+**What the email looks like**
+- Personalized: the first sentence is a specific reason this company fits us. Low-confidence drafts get
+  rewritten or dropped.
+- One recipient per email: no CC/BCC lists.
+- Plain text, no attachments. The brochure is a Drive link.
+- Every email ends with "If this isn't relevant for you, just reply 'no' and we won't follow up." The
+  sender adds it if a draft is missing it.
+- Honest: prompts forbid made-up facts, but they are only as accurate as `config.json` and
+  `brochure.md`.
+
+**If something goes wrong**
+- Gmail warns about unusual activity → stop sending for 24-48 hours, lower `--daily-cap`.
+- Someone complains → apologize, mark them `declined`, never contact again.
+- App password leaked → delete it in Google account settings immediately and make a new one.
+
+---
+
+## Tuning the prompts
+
+All behaviour lives in `prompts/`. Edit, then rerun the society test (Step 0) to check.
+
+| Want to change... | Edit |
+|---|---|
+| Tone, length, structure, signature of emails | `prompts/outreach_system.md` |
+| What kinds of companies we look for | `prompts/queries_system.md` |
+| What counts as a company on a page | `prompts/extract_system.md` |
+| How strict the fit score is, preferred contacts | `prompts/score_system.md` |
+
+`{society_name}`, `{sender_name}` etc. in `outreach_system.md` are filled from `config.json`. Every
+prompt must keep asking for **JSON only**: the scripts parse it.
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `ImportError: attempted relative import` | Pull the latest code (`git pull`). Both `python -m outreach.x` and `python Outreach/outreach/x.py` work now. |
+| `No LLM server running` | Run `!python -m outreach.llm` first, on a Kaggle notebook with GPU T4 x2. |
+| `llama-server died` | Check accelerator is **T4 x2** (not P100 / single GPU) and read the printed log. |
+| `Nothing new to draft` | Those companies already have drafts. Use `--redo` to rewrite, or approve more prospects. |
+| `Nothing to send` | Set `approved` to `yes` in `output/drafts.csv`. |
+| `skip ... bad/missing address` | Put a real email in that row's `to` cell. |
+| `SMTPAuthenticationError` | Wrong app password, 2-Step Verification off, or secrets not switched on for the notebook. |
+| `Daily cap reached` | Working as intended. Wait, or (carefully) raise `--daily-cap`. |
+| Search returns nothing / errors | DuckDuckGo rate-limits bursts. Wait a few minutes, use fewer `--queries`. |
+| Few prospects found | Raise `--queries` / `--results-per-query`, improve `past_sponsors.csv` details. |
+| Emails mention wrong facts | Fix `config.json` / `brochure.md`; tighten `outreach_system.md`. |
+
+---
+
+## Limitations
+
+- Big companies rarely publish an email, so their `contact_emails` is often empty. Use `contact_role`
+  and find the right person manually.
+- Search quality depends on DuckDuckGo results and on how detailed `past_sponsors.csv` is.
+- Some websites block automated fetching or need JavaScript; those companies are skipped.
+- Kaggle deletes `/kaggle/working` after each session: download `output/` every time.
+- The llama.cpp binary comes from a community build on Hugging Face (`afsafwtggg/llama-cpp-t4-cache`),
+  not the official release.
+
+**Using a different LLM:** any OpenAI-compatible server works (Ollama, LM Studio, Groq, Gemini's
+OpenAI endpoint). Set `LLM_BASE_URL` (e.g. `http://localhost:11434/v1`) and `LLM_API_KEY`, and the Kaggle
+setup is skipped.
+
+---
 
 ## Who does what
 
-| Area | Files |
-|---|---|
-| Sponsor search quality | `prompts/queries_system.md`, `prompts/extract_system.md`, `outreach/web.py` |
-| Fit scoring | `prompts/score_system.md` |
-| Email quality | `prompts/outreach_system.md`, `data/brochure.md` (Design Team), format from Media & Marketing |
-| Data | `data/past_sponsors.csv`, `data/society_test.csv` |
-
-Using a different LLM: any OpenAI-compatible server works. Set `LLM_BASE_URL` (and `LLM_API_KEY`) and
-the Kaggle setup is skipped.
+| Area | Files | Owner |
+|---|---|---|
+| Sponsor search quality | `prompts/queries_system.md`, `prompts/extract_system.md`, `outreach/web.py` | |
+| Fit scoring | `prompts/score_system.md` | |
+| Email quality | `prompts/outreach_system.md`, `data/brochure.md` | Design Team (brochure), Media & Marketing (format) |
+| Data | `data/past_sponsors.csv`, `data/society_test.csv` | |
+| Sending + tracking | `outreach/send_emails.py`, `output/sent_log.csv` | |
+| Docs | `README.md` | |

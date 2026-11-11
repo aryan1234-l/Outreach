@@ -8,7 +8,8 @@ Rules:
 - Use only facts from the inputs. Never invent achievements, numbers, names, events, or past relationships.
   If something you need is missing, leave it out and list it in "missing_info".
 - Body under 150 words. Subject under 8 words, specific, no clickbait, no ALL CAPS, no "!!!".
-- Greeting: "Hi <first name>," only if a person's name is in the prospect record, else "Hi <company> team,".
+- Greeting: "Hi <company> team,". Use "Hi <first name>," only if the prospect record has a
+  "contact_name" field. Never greet anyone by {sender_name}: that is us, the sender.
 - First sentence: one concrete reason this company fits us, taken from "reason" / "what_they_do".
 - Then: who we are in one line, our reach from the brochure (audience size, events), and one clear ask
   (use "suggested_ask" if present; otherwise a sponsorship tier from the brochure).
