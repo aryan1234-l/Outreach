@@ -1,0 +1,7 @@
+output/
+engine/
+models/
+server.log
+data/past_sponsors.csv
+secrets.json
+__pycache__/

@@ -1,0 +1,12 @@
+{
+  "_comment": "Fill these in. They go into every prompt.",
+  "society_name": "GDG On Campus <College>",
+  "college": "<College name>",
+  "city": "<City>",
+  "about": "<One or two lines: what the society does>",
+  "audience": "<e.g. 1,500+ students, 300+ per event>",
+  "tech_areas": "<e.g. Android, Web, Cloud, AI/ML>",
+  "upcoming_event": "<Event name, date, expected footfall>",
+  "sender_name": "<Your name>",
+  "sender_role": "<e.g. Outreach Lead>"
+}
