@@ -68,6 +68,9 @@ if not os.path.exists(past):
 sh(f"{sys.executable} -m outreach.find_sponsors --queries 4 --results-per-query 3 --max-candidates 6")
 sh("cat output/prospects.csv", check=False)
 
+banner("6. Status")
+sh(f"{sys.executable} -m outreach.status", check=False)
+
 banner("Done")
 print("Outputs: output/drafts.csv, output/drafts/*.txt, output/prospects.csv")
 sh("tail -n 20 /kaggle/working/server.log", check=False)

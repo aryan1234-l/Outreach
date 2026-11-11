@@ -37,22 +37,27 @@ approves each email. Only then can `send_emails` send it.
  data/past_sponsors.csv
           │
           ▼
- ┌──────────────────────────── find_sponsors ────────────────────────────┐
- │ 1. LLM reads past sponsors + config.json, writes search queries        │
- │ 2. Each query is searched on the web (ddgs)                            │
- │ 3. Each result page is fetched; LLM lists companies on it              │
- │ 4. Companies already in past sponsors / earlier runs are dropped       │
- │ 5. Each new company's own website is read (home + contact/about pages) │
- │ 6. LLM scores fit 1-10, writes a reason, picks a public contact email  │
- └─────────────────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────── find_sponsors ─────────────────────────────┐
+ │ 1. LLM reads past sponsors + config.json, writes search queries          │
+ │ 2. Each query is searched on the web (ddgs)                              │
+ │ 3. Each result page is fetched; LLM lists companies on it                │
+ │ 4. Companies/domains already in past sponsors or earlier runs dropped    │
+ │ 5. Each company's site is read: home + sponsor/partner/campus/contact    │
+ │ 6. Contacts: emails on their site; if none, public @theirdomain emails   │
+ │    found on the web. Ranked: sponsorship > campus > marketing > hr > info│
+ │ 7. Evidence: web search for hackathons/fests they sponsored before       │
+ │ 8. LLM scores fit 1-10, writes reason + a specific opening hook          │
+ └───────────────────────────────────────────────────────────────────────────┘
           │
           ▼
  output/prospects.csv  ──►  HUMAN sets status = approved on good rows
           │
           ▼
- ┌──────── draft_emails ────────┐
- │ prospect + brochure + prompt │──►  output/drafts.csv, output/drafts/*.txt
- └──────────────────────────────┘
+ ┌──────────── draft_emails ─────────────┐
+ │ writer: prospect + brochure → email    │──►  output/drafts.csv, output/drafts/*.txt
+ │ editor: checks facts, spam words,      │     (review_score, review_issues per draft)
+ │ length, greeting, opt-out → fixes it   │
+ └────────────────────────────────────────┘
           │
           ▼
  HUMAN reads every draft, edits it, sets approved = yes
@@ -62,6 +67,15 @@ approves each email. Only then can `send_emails` send it.
  │ preview by default            │──►  Gmail (max 30 per 24h, 30-90 s gaps)
  │ --send to actually send       │──►  output/sent_log.csv (never email twice)
  └──────────────────────────────┘
+          │  6+ days later
+          ▼
+ ┌──────── followups ───────────────────────┐
+ │ reads Gmail (IMAP): marks replies/bounces │
+ │ ONE follow-up, threaded as "Re:", only to │──►  Gmail
+ │ companies that haven't replied            │
+ └───────────────────────────────────────────┘
+
+ status  ──►  one-screen overview: found / approved / sent / replied / follow-ups due
 ```
 
 Every LLM step has its own system prompt in `prompts/`, so the team can tune behaviour without touching
@@ -82,11 +96,14 @@ code.
 | `prompts/extract_system.md` | Prompt: web page → list of companies on it. |
 | `prompts/score_system.md` | Prompt: company website → fit score, reason, contact. |
 | `prompts/outreach_system.md` | Prompt: prospect + brochure → email (the main system prompt). |
+| `prompts/review_system.md` | Prompt: editor pass that checks and fixes every draft. |
 | `outreach/llm.py` | Downloads and starts Qwen on Kaggle; `chat_json()` helper used by all steps. |
 | `outreach/web.py` | Web search, page fetching, public email extraction. |
 | `outreach/find_sponsors.py` | Step 1: find and score new prospects. |
 | `outreach/draft_emails.py` | Step 2: write email drafts for approved prospects. |
 | `outreach/send_emails.py` | Step 3: send approved drafts through Gmail. |
+| `outreach/followups.py` | Step 4: detect replies/bounces in Gmail, send one threaded follow-up. |
+| `outreach/status.py` | Overview of the whole pipeline. |
 | `kaggle/run_e2e.py` | One script that runs the whole pipeline on Kaggle (test mode, no sending). |
 | `output/` | Everything the tools produce. **Not committed.** |
 
@@ -262,9 +279,14 @@ Check how they look in the inbox (and that they didn't land in spam). Then clear
 It takes roughly 1-2 minutes per company. Rows are appended to `output/prospects.csv` as it goes, so you
 can stop it any time. Rerunning skips companies already found.
 
+Each company gets: its website plus up to 4 of its sponsor/partner/campus/contact pages read, public
+contact emails (from its site, or `@theirdomain` addresses found on the web), and a search for
+hackathons/fests it sponsored before. Rows scoring below `--min-save-score` (default 1) are not saved.
+
 ### Step 2: review prospects
-Download `output/prospects.csv`, open it in Google Sheets, and for each row:
-- Read `reason`. Does it make sense? Is the company real and active?
+Download `output/prospects.csv`, open it in Google Sheets, and sort by `fit_score`. For each row:
+- Read `reason` and `personal_hook`. Do they make sense? Is the company real and active?
+- `past_sponsorships` filled in = strongest leads. Contact these first.
 - Set `status` to `approved` for the good ones (or `rejected`).
 - If `contact_emails` is empty, find a public contact (company site, "Contact us" page) or note the
   `contact_role` to find on LinkedIn **manually**.
@@ -283,12 +305,25 @@ Upload it back to `output/prospects.csv` (Kaggle file browser → upload).
 | `--all` | Draft every row, ignoring `status` (testing only) |
 | `--min-score N` | Only rows with `fit_score >= N` |
 | `--redo` | Throw away `drafts.csv` and redraft everything |
+| `--no-review` | Skip the editor pass (faster, lower quality) |
 
-Rerunning only drafts new companies; existing drafts and your edits are kept.
+Every draft goes through two LLM passes: the **writer** (`outreach_system.md`) and the **editor**
+(`review_system.md`), which checks every fact against the inputs, the greeting, length, spam words, the
+opt-out line and placeholders, and rewrites the email if needed. A final code check flags anything left
+over as `CHECK: ...` in `review_issues`.
+
+Rerunning only drafts new companies; existing drafts, your edits, and companies already emailed are
+skipped.
 
 ### Step 4: approve drafts
-Open `output/drafts.csv`. For each row: read the body, fix anything wrong, check `missing_info`, and
-set `approved` to `yes`. Rows with low `confidence` usually need a rewrite or should be dropped.
+Open `output/drafts.csv`. For each row:
+- Read the `subject` and `body`. Would you reply to this?
+- Look at `review_issues`: `fixed: ...` = the editor already corrected it; `CHECK: ...` = you must fix
+  it.
+- Fill anything in `missing_info` you can, or remove that part.
+- Set `approved` to `yes`.
+
+Drafts with `review_score` below 7 or low `confidence` usually need a rewrite or should be dropped.
 
 ### Step 5: send
 ```python
@@ -307,9 +342,36 @@ set `approved` to `yes`. Rows with low `confidence` usually need a rewrite or sh
 The sender cleans each address (removes invisible characters, `mailto:`, `Name <...>`), skips rows that
 aren't approved, have no valid address, or were already contacted, and logs every send.
 
-### Step 6: follow up
-Replies arrive in the society inbox. Update `status` in your prospects sheet: `replied`, `declined`,
-`meeting`, `sponsored`. One polite follow-up after about 7 days with no reply is fine; after that, stop.
+### Step 6: replies and follow-ups (run every few days)
+```python
+!python -m outreach.followups            # checks Gmail for replies/bounces, previews follow-ups due
+!python -m outreach.followups --send     # sends them
+```
+
+It logs into the society Gmail over IMAP (same app password) and:
+- marks a company **replied** if any email arrived from their domain (or their exact address, for
+  gmail/outlook addresses) after we wrote. Replied companies never get a follow-up.
+- marks **bounced** if Gmail returned a delivery failure for that address. Fix the address by hand.
+- sends **one** follow-up to companies that haven't replied 6+ days after the first email
+  (`--after-days`). It's short, polite, threaded as `Re: <original subject>`, and quotes the first email.
+  There is never a second follow-up.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--send` | off | Send the follow-ups (otherwise preview) |
+| `--after-days` | 6 | Days to wait after the first email |
+| `--skip-check` | off | Don't read Gmail first (not recommended) |
+| `--limit` / `--daily-cap` | 15 / 30 | Same caps as sending; first emails + follow-ups share the daily cap |
+
+Then handle replies personally from the Gmail inbox, and update `status` in your prospects sheet:
+`replied`, `declined`, `meeting`, `sponsored`.
+
+### Step 7: status
+```python
+!python -m outreach.status
+```
+Shows prospects by status, how many have emails, approved drafts, drafts needing checks, sent, reply
+rate, bounces, follow-ups due, sends in the last 24 h, and the list of replies to handle.
 
 ---
 
@@ -317,10 +379,10 @@ Replies arrive in the society inbox. Update `status` in your prospects sheet: `r
 
 | File | Columns | Notes |
 |---|---|---|
-| `output/prospects.csv` | company, website, what_they_do, fit_score, reason, suggested_ask, contact_emails, contact_role, found_via, status, notes | `found_via` = the page where we found them. `contact_emails` only contains addresses that really appear on their website. |
-| `output/drafts.csv` | company, to, subject, body, confidence, missing_info, approved | Edit `body`/`subject` freely before approving. |
-| `output/drafts/<company>.txt` | - | Same drafts, easy to read. |
-| `output/sent_log.csv` | sent_at, company, to, subject, message_id, mode | `mode` = `real` or `test`. **Keep this file between sessions**: it is what stops double-sending. |
+| `output/prospects.csv` | company, website, fit_score, what_they_do, reason, personal_hook, past_sponsorships, suggested_ask, contact_emails, contact_role, found_via, status, notes | `found_via` = page where we found them. `contact_emails` only holds addresses actually found on their site or the web (best first), never guessed. |
+| `output/drafts.csv` | company, to, subject, body, review_score, confidence, review_issues, missing_info, approved | Edit `body`/`subject` freely before approving. |
+| `output/drafts/<company>.txt` | - | Same drafts, easy to read, with the review notes at the bottom. |
+| `output/sent_log.csv` | sent_at, company, to, subject, message_id, mode, replied_at, bounced_at, followup_at | `mode` = `real` or `test`. **Keep this file between sessions**: it stops double-sending and drives follow-ups. |
 | `/kaggle/working/server.log` | - | llama.cpp log, for debugging. |
 
 ---
@@ -344,8 +406,10 @@ The goal: nobody we email could reasonably call it spam, and the society's Gmail
 **How much**
 - Max 20 per run and 30 per 24 hours by default, with a random 30-90 s gap. Bursts of similar emails are
   what get Gmail accounts flagged.
-- One email per company, plus at most one follow-up after about 7 days. `sent_log.csv` blocks
-  re-sending to the same company or address.
+- One email per company, plus at most one follow-up after 6+ days, and only if they haven't replied
+  (checked automatically in Gmail). `sent_log.csv` blocks re-sending to the same company or address.
+- Bounced addresses are flagged and never retried automatically. Repeated bounces hurt the account's
+  reputation.
 - Spread big campaigns over several days, or several team members' society accounts.
 
 **What the email looks like**
@@ -372,6 +436,8 @@ All behaviour lives in `prompts/`. Edit, then rerun the society test (Step 0) to
 | Want to change... | Edit |
 |---|---|
 | Tone, length, structure, signature of emails | `prompts/outreach_system.md` |
+| What the editor checks / fixes in each draft | `prompts/review_system.md` |
+| Follow-up wording | `FOLLOWUP` text at the top of `outreach/followups.py` |
 | What kinds of companies we look for | `prompts/queries_system.md` |
 | What counts as a company on a page | `prompts/extract_system.md` |
 | How strict the fit score is, preferred contacts | `prompts/score_system.md` |
@@ -393,6 +459,9 @@ prompt must keep asking for **JSON only**: the scripts parse it.
 | `skip ... bad/missing address` | Put a real email in that row's `to` cell. |
 | `SMTPAuthenticationError` | Wrong app password, 2-Step Verification off, or secrets not switched on for the notebook. |
 | `Daily cap reached` | Working as intended. Wait, or (carefully) raise `--daily-cap`. |
+| `followups`: `No real emails in sent_log.csv` | Upload the `sent_log.csv` you downloaded last session to `output/`. |
+| IMAP login fails | Same app password as SMTP; check the secrets are switched on. If Gmail says IMAP is disabled, enable it in Gmail settings → Forwarding and POP/IMAP. |
+| Many `CHECK:` issues in drafts | Usually missing info in `config.json` / `brochure.md` (dates, real link, tiers). |
 | Search returns nothing / errors | DuckDuckGo rate-limits bursts. Wait a few minutes, use fewer `--queries`. |
 | Few prospects found | Raise `--queries` / `--results-per-query`, improve `past_sponsors.csv` details. |
 | Emails mention wrong facts | Fix `config.json` / `brochure.md`; tighten `outreach_system.md`. |

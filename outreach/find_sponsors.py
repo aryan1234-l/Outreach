@@ -8,11 +8,10 @@ Nobody is contacted here; a human reviews the sheet and sets status=approved.
 import argparse
 import csv
 import json
-import re
 import pathlib
+import re
 import sys
 import time
-from urllib.parse import urlparse
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))  # works as script or module
 from outreach import web
@@ -20,20 +19,27 @@ from outreach.llm import ROOT, chat_json, load_config, load_prompt, resolve, sta
 
 OUT = ROOT / "output" / "prospects.csv"
 FIELDS = [
-    "company", "website", "what_they_do", "fit_score", "reason", "suggested_ask",
-    "contact_emails", "contact_role", "found_via", "status", "notes",
+    "company", "website", "fit_score", "what_they_do", "reason", "personal_hook", "past_sponsorships",
+    "suggested_ask", "contact_emails", "contact_role", "found_via", "status", "notes",
 ]
 SUFFIXES = r"\b(pvt|private|ltd|limited|inc|llp|llc|corp|corporation|technologies|technology|solutions|india)\b"
 
 
 def norm(name):
-    name = re.sub(SUFFIXES, "", name.lower())
+    name = re.sub(SUFFIXES, "", (name or "").lower())
     return re.sub(r"[^a-z0-9]", "", name)
 
 
 def read_csv(path):
     with open(path, newline="", encoding="utf-8-sig") as fh:
         return list(csv.DictReader(fh))
+
+
+def write_csv(path, rows):
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, FIELDS, extrasaction="ignore", restval="")
+        w.writeheader()
+        w.writerows(rows)
 
 
 def company_col(rows):
@@ -47,25 +53,40 @@ def society_blurb(cfg):
     return json.dumps({k: v for k, v in cfg.items() if not k.startswith("_")}, indent=2, ensure_ascii=False)
 
 
+def resolve_site(name, hint):
+    if hint and web.is_company_site(hint):
+        return hint
+    for h in web.search(f"{name} official website", max_results=6):
+        if web.is_company_site(h.get("href", "")):
+            return h["href"]
+    return ""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--past", default=str(ROOT / "data" / "past_sponsors.csv"))
     ap.add_argument("--max-candidates", type=int, default=30, help="companies to research this run")
     ap.add_argument("--queries", type=int, default=12, help="search queries to generate")
     ap.add_argument("--results-per-query", type=int, default=5)
+    ap.add_argument("--min-save-score", type=int, default=1, help="don't save prospects scoring below this")
     args, _ = ap.parse_known_args()
 
     cfg = load_config()
     past = read_csv(resolve(args.past))
     col = company_col(past)
     known = {norm(r[col]) for r in past if r.get(col)}
+    known_domains = {web.domain(r["website"]) for r in past if r.get("website")}
 
     OUT.parent.mkdir(exist_ok=True)
     if OUT.exists():
-        known |= {norm(r["company"]) for r in read_csv(OUT)}
+        existing = read_csv(OUT)
+        known |= {norm(r["company"]) for r in existing}
+        known_domains |= {web.domain(r["website"]) for r in existing if r.get("website")}
+        with open(OUT, encoding="utf-8-sig") as fh:
+            if fh.readline().strip().split(",") != FIELDS:
+                write_csv(OUT, existing)  # upgrade old file to the current columns
     else:
-        with open(OUT, "w", newline="", encoding="utf-8") as fh:
-            csv.DictWriter(fh, FIELDS).writeheader()
+        write_csv(OUT, [])
 
     start_server()
 
@@ -83,7 +104,7 @@ def main():
     candidates, seen_urls = {}, set()
     extract_prompt = load_prompt("extract_system")
     for query in queries:
-        if len(candidates) >= args.max_candidates:
+        if len(candidates) >= args.max_candidates * 2:
             break
         print(f"\nSearching: {query}")
         for res in web.search(query, max_results=args.results_per_query):
@@ -94,10 +115,14 @@ def main():
             text, _ = web.fetch(url)
             if len(text) < 200:
                 continue
-            found = chat_json(
-                extract_prompt,
-                f"Page URL: {url}\nPage title: {res.get('title', '')}\n\nPage text:\n{text}",
-            ).get("companies", [])
+            try:
+                found = chat_json(
+                    extract_prompt,
+                    f"Page URL: {url}\nPage title: {res.get('title', '')}\n\nPage text:\n{text}",
+                ).get("companies", [])
+            except RuntimeError as e:
+                print(f"  (skipped page: {e})")
+                continue
             for c in found:
                 name = (c.get("name") or "").strip()
                 key = norm(name)
@@ -108,54 +133,74 @@ def main():
             time.sleep(1)
     print(f"\n{len(candidates)} new candidate companies")
 
-    # 3. Research each candidate on its own website and score the fit
+    # 3. Research each candidate: own website, public contacts, sponsorship history -> score
     score_prompt = load_prompt("score_system")
-    for i, cand in enumerate(list(candidates.values())[: args.max_candidates], 1):
-        site = cand["website"]
-        if not site or not web.is_company_site(site):
-            hits = [h for h in web.search(f"{cand['name']} official website", max_results=5)
-                    if web.is_company_site(h.get("href", ""))]
-            site = hits[0]["href"] if hits else ""
-        if site and not site.startswith("http"):
-            site = "https://" + site
-        if site:
-            parts = urlparse(site)
-            site = f"{parts.scheme}://{parts.netloc}"
-        if not site:
+    saved = 0
+    for i, cand in enumerate(candidates.values(), 1):
+        if saved >= args.max_candidates:
+            break
+        site = resolve_site(cand["name"], cand["website"])
+        dom = web.domain(site) if site else ""
+        if not dom:
             print(f"[{i}] {cand['name']}: no website found, skipped")
             continue
+        if dom in known_domains:
+            print(f"[{i}] {cand['name']}: already known ({dom}), skipped")
+            continue
+        known_domains.add(dom)
 
         pages, emails = web.company_pages(site)
         page_text = "\n\n".join(f"[{u}]\n{t}" for u, t in pages if t)
         if not page_text:
             print(f"[{i}] {cand['name']}: site unreachable, skipped")
             continue
+        if not emails:
+            emails = web.search_contacts(cand["name"], dom)
+        evidence = web.sponsorship_evidence(cand["name"])
 
-        s = chat_json(
-            score_prompt,
-            f"Our society:\n{society_blurb(cfg)}\n\nCompany: {cand['name']}\nWebsite: {site}\n"
-            f"Public emails found on their site: {emails or 'none'}\n\nTheir website text:\n{page_text[:9000]}",
-        )
-        # Only keep emails that really appear on their site (no made-up addresses).
-        picked = [e for e in s.get("contact_emails", []) if e in emails]
+        try:
+            s = chat_json(
+                score_prompt,
+                f"Our society:\n{society_blurb(cfg)}\n\nCompany: {cand['name']}\nWebsite: https://{dom}\n"
+                f"Public emails found (best first): {emails or 'none'}\n\n"
+                f"Web snippets about their past sponsorships:\n{chr(10).join(evidence) or 'none found'}\n\n"
+                f"Their website text:\n{page_text[:10000]}",
+            )
+        except RuntimeError as e:
+            print(f"[{i}] {cand['name']}: scoring failed ({e}), skipped")
+            continue
+
+        # Only keep emails that really appear on their site / the web (no made-up addresses).
+        picked = [e.lower() for e in s.get("contact_emails", []) if e.lower() in emails] or emails[:2]
+        try:
+            score = int(float(s.get("fit_score", 0)))
+        except (TypeError, ValueError):
+            score = 0
+        if score < args.min_save_score:
+            print(f"[{i}] {cand['name']}: fit {score}/10, not saved")
+            continue
         row = {
             "company": s.get("company") or cand["name"],
-            "website": site,
+            "website": f"https://{dom}",
+            "fit_score": score,
             "what_they_do": s.get("what_they_do", ""),
-            "fit_score": s.get("fit_score", ""),
             "reason": s.get("reason", ""),
+            "personal_hook": s.get("personal_hook", ""),
+            "past_sponsorships": s.get("past_sponsorships", ""),
             "suggested_ask": s.get("suggested_ask", ""),
-            "contact_emails": "; ".join(picked),
+            "contact_emails": "; ".join(picked[:3]),
             "contact_role": s.get("contact_role", ""),
             "found_via": cand["found_via"],
             "status": "new",
             "notes": "",
         }
         with open(OUT, "a", newline="", encoding="utf-8") as fh:
-            csv.DictWriter(fh, FIELDS).writerow(row)
-        print(f"[{i}] {row['company']}: fit {row['fit_score']}/10, emails: {row['contact_emails'] or '-'}")
+            csv.DictWriter(fh, FIELDS, extrasaction="ignore", restval="").writerow(row)
+        saved += 1
+        print(f"[{i}] {row['company']}: fit {score}/10, emails: {row['contact_emails'] or '-'}"
+              f"{', has sponsorship history' if row['past_sponsorships'] else ''}")
 
-    print(f"\nDone. Review {OUT}, set status=approved on the ones worth contacting.")
+    print(f"\nDone: {saved} prospects saved. Review {OUT}, set status=approved on the ones worth contacting.")
 
 
 if __name__ == "__main__":

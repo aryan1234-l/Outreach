@@ -31,7 +31,8 @@ from outreach.llm import ROOT, load_config, resolve
 
 OUT_DIR = ROOT / "output"
 LOG = OUT_DIR / "sent_log.csv"
-LOG_FIELDS = ["sent_at", "company", "to", "subject", "message_id", "mode"]
+LOG_FIELDS = ["sent_at", "company", "to", "subject", "message_id", "mode",
+              "replied_at", "bounced_at", "followup_at"]
 EMAIL_OK = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 OPT_OUT = "If this isn't relevant for you, just reply 'no' and we won't follow up."
 
@@ -70,16 +71,42 @@ def read_log():
         return list(csv.DictReader(fh))
 
 
+def write_log(rows):
+    OUT_DIR.mkdir(exist_ok=True)
+    with open(LOG, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, LOG_FIELDS, extrasaction="ignore", restval="")
+        w.writeheader()
+        w.writerows(rows)
+
+
 def append_log(row):
-    new = not LOG.exists()
+    rows = read_log()
+    if rows and list(rows[0].keys()) != LOG_FIELDS:
+        write_log(rows)  # upgrade an older log to the current columns
+    elif not LOG.exists():
+        write_log([])
     with open(LOG, "a", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, LOG_FIELDS)
-        if new:
-            w.writeheader()
-        w.writerow(row)
+        csv.DictWriter(fh, LOG_FIELDS, extrasaction="ignore", restval="").writerow(row)
 
 
-def build_message(sender, sender_name, to, subject, body):
+def sends_last_24h(log):
+    """Real emails (first emails + follow-ups) sent in the last 24 hours."""
+    cutoff = dt.datetime.now() - dt.timedelta(hours=24)
+    n = 0
+    for r in log:
+        if r.get("mode") != "real":
+            continue
+        for col in ("sent_at", "followup_at"):
+            if r.get(col) and dt.datetime.fromisoformat(r[col]) > cutoff:
+                n += 1
+    return n
+
+
+def sender_identity(cfg):
+    return f"{cfg.get('sender_name', '')} | {cfg.get('society_name', '')}".strip(" |")
+
+
+def build_message(sender, sender_name, to, subject, body, in_reply_to=None):
     if "reply 'no'" not in body.lower():
         body = body.rstrip() + "\n\n" + OPT_OUT
     msg = EmailMessage()
@@ -87,6 +114,9 @@ def build_message(sender, sender_name, to, subject, body):
     msg["To"] = to
     msg["Subject"] = subject
     msg["Message-ID"] = make_msgid(domain=sender.split("@")[1])
+    if in_reply_to:  # follow-ups thread under the first email
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
     msg.set_content(body)
     return msg
 
@@ -103,7 +133,7 @@ def main():
     args, _ = ap.parse_known_args()
 
     cfg = load_config()
-    sender_name = f"{cfg.get('sender_name', '')} | {cfg.get('society_name', '')}".strip(" |")
+    sender_name = sender_identity(cfg)
 
     with open(resolve(args.input), newline="", encoding="utf-8-sig") as fh:
         drafts = list(csv.DictReader(fh))
@@ -111,8 +141,7 @@ def main():
     log = read_log()
     real_log = [r for r in log if r["mode"] == "real"]
     done = {(r["to"].lower()) for r in real_log} | {r["company"].lower() for r in real_log}
-    now = dt.datetime.now()
-    sent_24h = sum(1 for r in real_log if now - dt.datetime.fromisoformat(r["sent_at"]) < dt.timedelta(hours=24))
+    sent_24h = sends_last_24h(log)
     room = args.limit if args.test_to else min(args.limit, args.daily_cap - sent_24h)
 
     if args.test_to is not None:
