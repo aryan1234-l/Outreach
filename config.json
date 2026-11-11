@@ -1,12 +1,12 @@
 {
   "_comment": "Fill these in. They go into every prompt.",
-  "society_name": "GDG On Campus <College>",
-  "college": "<College name>",
-  "city": "<City>",
-  "about": "<One or two lines: what the society does>",
-  "audience": "<e.g. 1,500+ students, 300+ per event>",
-  "tech_areas": "<e.g. Android, Web, Cloud, AI/ML>",
-  "upcoming_event": "<Event name, date, expected footfall>",
-  "sender_name": "<Your name>",
-  "sender_role": "<e.g. Outreach Lead>"
+  "society_name": "GDG On Campus National Institute of Technology Hamirpur",
+  "college": "National Institute of Technology Hamirpur",
+  "city": "Hamirpur",
+  "about": "GDG NITH is a student developer community that conducts hands-on workshops, hackathons, and technical study jams focused on modern developer technologies and open-source software. It provides a collaborative environment for students to build real-world projects, learn industry-relevant skills, and connect with peer developers and mentors.",
+  "audience": "500+",
+  "tech_areas": "Android, Web, Cloud, AI/ML, Blockchain",
+  "upcoming_event": "Labrynth",
+  "sender_name": "Aryan",
+  "sender_role": "Supreme Leader"
 }
