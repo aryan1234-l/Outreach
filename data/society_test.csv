@@ -1,3 +1,4 @@
 company,website,what_they_do,fit_score,reason,suggested_ask,contact_emails,contact_role,status
-<Test member 1 as fake company>,https://example.com,<what their fake company does>,8,<why it fits>,Cash sponsorship,<team member's own email>,,approved
-<Test member 2 as fake company>,https://example.com,<what their fake company does>,4,<vague reason to test low confidence>,Swag,<team member's own email>,,approved
+Dell,https://aiml.com,AI/ML,250,Very specific,,bansalraman.dev@gmail.com,CS supreme,approved
+StutterClear,https://speakclear.com,Cloud,100,Not so specific,,ultragaming123q@gmail.com,Civilian,approved
+Google,https://cuteboy.com,All fields known to mankind,5000,Too specific to be true,,arynrav11@gmail.com,Supreme leader,surely approved
